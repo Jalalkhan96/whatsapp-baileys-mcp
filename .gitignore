@@ -1,0 +1,6 @@
+node_modules/
+session/
+audit.log
+.env
+*.log
+current-qr.png
