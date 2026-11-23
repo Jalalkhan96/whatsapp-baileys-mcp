@@ -306,6 +306,373 @@ server.tool('wa_block_user', 'Block or unblock a WhatsApp user from the connecte
     return ok({ done: true, jid: target, action });
   });
 
+
+// ---------------------------------------------------------------------------
+// Expansion pack (2026-11-23): group management, broadcasts (chat / group /
+// channel), channel management + automation (in-process scheduler).
+// All tools are direct Baileys calls — no external plugins required.
+// ---------------------------------------------------------------------------
+
+async function resolveChannelJid(s, channel) {
+  let jid = String(channel).trim();
+  if (jid.endsWith('@newsletter')) return jid;
+  const m = jid.match(/whatsapp\.com\/channel\/([A-Za-z0-9]+)/);
+  if (!m) throw new Error('Channel must be a ...@newsletter JID or an invite link.');
+  const info = await s.newsletterMetadata('invite', m[1]);
+  jid = info && (info.id || info.jid);
+  if (!jid) throw new Error('Could not resolve channel link to a JID.');
+  return jid;
+}
+
+async function broadcastOne(s, jid, text, image_path) {
+  let payload;
+  if (image_path) {
+    payload = { image: fs.readFileSync(image_path), _skipForwardContext: true };
+    if (text) payload.caption = text;
+  } else {
+    payload = jid.endsWith('@newsletter') ? { text, _skipForwardContext: true } : { text };
+  }
+  const r = await s.sendMessage(jid, payload);
+  return (r && r.key && r.key.id) || null;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// --- Group management -------------------------------------------------------
+
+server.tool('wa_group_create', 'Create a new WhatsApp group with the connected number as admin. participants: phone numbers or JIDs (at least 1).',
+  { name: z.string().min(1).max(100),
+    participants: z.array(z.string()).min(1).max(100) },
+  async ({ name, participants }) => {
+    const s = wa.requireSock();
+    const jids = participants.map((p) => normJid(p));
+    const md = await s.groupCreate(name, jids);
+    // The creation response can over-report members: under LID addressing or
+    // a user's privacy settings, an added user may only receive an invite.
+    // Verify against live metadata and report who is actually in the group.
+    let present = null;
+    try {
+      const live = await s.groupMetadata(md.id);
+      present = (live.participants || []).map((p) => p.phoneNumber || p.id);
+    } catch (_) {}
+    audit('group_create', { name, group: md.id, requested: jids.length });
+    return ok({ created: true, group: md.id, name: md.subject || name, members_present: present, note: 'Anyone missing from members_present was sent an invite instead (their privacy settings) and joins when they accept.' });
+  });
+
+server.tool('wa_group_rename', 'Change a group subject (name). The connected number must be an admin if the group is locked.',
+  { group_jid: z.string(), subject: z.string().min(1).max(100) },
+  async ({ group_jid, subject }) => {
+    const s = wa.requireSock();
+    const jid = String(group_jid).trim();
+    await s.groupUpdateSubject(jid, subject);
+    audit('group_rename', { group: jid, subject });
+    return ok({ updated: true, group: jid, subject });
+  });
+
+server.tool('wa_group_set_description', 'Set or clear a group description. The connected number must be an admin if the group is locked.',
+  { group_jid: z.string(), description: z.string().max(2048) },
+  async ({ group_jid, description }) => {
+    const s = wa.requireSock();
+    const jid = String(group_jid).trim();
+    await s.groupUpdateDescription(jid, description);
+    audit('group_set_description', { group: jid, len: description.length });
+    return ok({ updated: true, group: jid });
+  });
+
+server.tool('wa_group_settings', 'Change a group setting: announce = only admins can message; not_announce = everyone can message; locked = only admins can edit group info; unlocked = everyone can edit group info.',
+  { group_jid: z.string(), setting: z.enum(['announce', 'not_announce', 'locked', 'unlocked']) },
+  async ({ group_jid, setting }) => {
+    const s = wa.requireSock();
+    const jid = String(group_jid).trim();
+    await s.groupSettingUpdate(jid, setting);
+    audit('group_settings', { group: jid, setting });
+    return ok({ updated: true, group: jid, setting });
+  });
+
+server.tool('wa_group_participants', 'Add, remove, promote or demote group participants. The connected number must be a group admin. Returns the per-participant status codes from WhatsApp.',
+  { group_jid: z.string(),
+    action: z.enum(['add', 'remove', 'promote', 'demote']),
+    participants: z.array(z.string()).min(1).max(100) },
+  async ({ group_jid, action, participants }) => {
+    const s = wa.requireSock();
+    const jid = String(group_jid).trim();
+    let jids = participants.map((p) => normJid(p));
+    if (action !== 'add') {
+      // Existing members may be stored under LID JIDs — map each requested
+      // number to the participant id exactly as the group metadata stores it,
+      // otherwise WhatsApp answers 404 for promote/remove/demote.
+      try {
+        const md = await s.groupMetadata(jid);
+        const byPhone = {};
+        for (const p of (md.participants || [])) {
+          const phone = (p.phoneNumber || p.id || '').split('@')[0].split(':')[0];
+          if (phone) byPhone[phone] = p.id;
+        }
+        jids = jids.map((j) => byPhone[j.split('@')[0].split(':')[0]] || j);
+      } catch (_) {}
+    }
+    const res = await s.groupParticipantsUpdate(jid, jids, action);
+    audit('group_participants', { group: jid, action, count: jids.length });
+    return ok({ done: true, group: jid, action, results: res });
+  });
+
+server.tool('wa_group_ephemeral', 'Set disappearing messages for a group: expiration_seconds 0 = off, 86400 = 24 hours, 604800 = 7 days, 7776000 = 90 days.',
+  { group_jid: z.string(), expiration_seconds: z.number().int() },
+  async ({ group_jid, expiration_seconds }) => {
+    const s = wa.requireSock();
+    const jid = String(group_jid).trim();
+    await s.groupToggleEphemeral(jid, expiration_seconds);
+    audit('group_ephemeral', { group: jid, expiration_seconds });
+    return ok({ updated: true, group: jid, expiration_seconds });
+  });
+
+server.tool('wa_group_join', 'Join a group from an invite code or a chat.whatsapp.com/invite link.',
+  { invite: z.string() },
+  async ({ invite }) => {
+    const s = wa.requireSock();
+    const m = String(invite).match(/chat\.whatsapp\.com\/(?:invite\/)?([A-Za-z0-9]+)/);
+    const code = m ? m[1] : String(invite).trim();
+    const jid = await s.groupAcceptInvite(code);
+    audit('group_join', { group: jid });
+    return ok({ joined: true, group: jid });
+  });
+
+server.tool('wa_group_leave', 'Leave a group.',
+  { group_jid: z.string() },
+  async ({ group_jid }) => {
+    const s = wa.requireSock();
+    const jid = String(group_jid).trim();
+    await s.groupLeave(jid);
+    audit('group_leave', { group: jid });
+    return ok({ left: true, group: jid });
+  });
+
+server.tool('wa_group_requests', 'Manage group join requests: action list shows pending requests; approve/reject take participants (numbers or JIDs). Admin only.',
+  { group_jid: z.string(),
+    action: z.enum(['list', 'approve', 'reject']),
+    participants: z.array(z.string()).optional() },
+  async ({ group_jid, action, participants }) => {
+    const s = wa.requireSock();
+    const jid = String(group_jid).trim();
+    if (action === 'list') {
+      const reqs = await s.groupRequestParticipantsList(jid);
+      return ok({ group: jid, requests: reqs });
+    }
+    if (!participants || participants.length === 0) throw new Error('participants are required for approve/reject.');
+    const jids = participants.map((p) => normJid(p));
+    const res = await s.groupRequestParticipantsUpdate(jid, jids, action === 'approve' ? 'approve' : 'reject');
+    audit('group_requests', { group: jid, action, count: jids.length });
+    return ok({ done: true, group: jid, action, results: res });
+  });
+
+// --- Broadcasts --------------------------------------------------------------
+
+server.tool('wa_broadcast_groups', 'Broadcast one message (text, or an image with the text as caption) to many groups at once. Pass group_jids, or all_groups=true to reach every group the account is in. Max 60 targets, sequential with a delay between sends (default 1500 ms) to stay gentle on WhatsApp rate limits.',
+  { group_jids: z.array(z.string()).max(60).optional(),
+    all_groups: z.boolean().optional(),
+    text: z.string().max(4096).optional(),
+    image_path: z.string().optional().describe('Absolute path to a local image file'),
+    delay_ms: z.number().int().min(300).max(10000).optional() },
+  async ({ group_jids, all_groups, text, image_path, delay_ms }) => {
+    const s = wa.requireSock();
+    if (!text && !image_path) throw new Error('Provide text and/or image_path.');
+    let targets = group_jids ? group_jids.map((j) => String(j).trim()) : [];
+    if (all_groups) {
+      const all = await s.groupFetchAllParticipating();
+      targets = Object.keys(all || {});
+    }
+    targets = [...new Set(targets)].filter((j) => j.endsWith('@g.us')).slice(0, 60);
+    if (targets.length === 0) throw new Error('No group targets resolved.');
+    const delay = delay_ms || 1500;
+    const sent = [];
+    const failed = [];
+    for (const jid of targets) {
+      try { sent.push({ jid, message_id: await broadcastOne(s, jid, text, image_path) }); }
+      catch (e) { failed.push({ jid, error: String((e && e.message) || e).slice(0, 200) }); }
+      if (delay) await sleep(delay);
+    }
+    audit('broadcast_groups', { total: targets.length, sent: sent.length, failed: failed.length });
+    return ok({ total: targets.length, sent_count: sent.length, failed_count: failed.length, sent, failed });
+  });
+
+server.tool('wa_broadcast_chats', 'Broadcast one message (text, or an image with the text as caption) to a list of individual chats (phone numbers or JIDs). Max 60 targets, sequential with a delay between sends (default 1500 ms). Only message people who expect to hear from the account.',
+  { numbers: z.array(z.string()).min(1).max(60),
+    text: z.string().max(4096).optional(),
+    image_path: z.string().optional().describe('Absolute path to a local image file'),
+    delay_ms: z.number().int().min(300).max(10000).optional() },
+  async ({ numbers, text, image_path, delay_ms }) => {
+    const s = wa.requireSock();
+    if (!text && !image_path) throw new Error('Provide text and/or image_path.');
+    const targets = [...new Set(numbers.map((n) => normJid(n)))].slice(0, 60);
+    const delay = delay_ms || 1500;
+    const sent = [];
+    const failed = [];
+    for (const jid of targets) {
+      try { checkTarget(jid); sent.push({ jid, message_id: await broadcastOne(s, jid, text, image_path) }); }
+      catch (e) { failed.push({ jid, error: String((e && e.message) || e).slice(0, 200) }); }
+      if (delay) await sleep(delay);
+    }
+    audit('broadcast_chats', { total: targets.length, sent: sent.length, failed: failed.length });
+    return ok({ total: targets.length, sent_count: sent.length, failed_count: failed.length, sent, failed });
+  });
+
+server.tool('wa_broadcast_channels', 'Broadcast one post (text, or an image with the text as caption) to several WhatsApp Channels at once. The connected number must be an ADMIN of each channel. Channels may be JIDs or invite links. Max 20 channels.',
+  { channels: z.array(z.string()).min(1).max(20),
+    text: z.string().max(4096).optional(),
+    image_path: z.string().optional().describe('Absolute path to a local image file'),
+    delay_ms: z.number().int().min(300).max(10000).optional() },
+  async ({ channels, text, image_path, delay_ms }) => {
+    const s = wa.requireSock();
+    if (!text && !image_path) throw new Error('Provide text and/or image_path.');
+    const delay = delay_ms || 1500;
+    const sent = [];
+    const failed = [];
+    for (const ch of channels) {
+      try {
+        const jid = await resolveChannelJid(s, ch);
+        sent.push({ channel: jid, message_id: await broadcastOne(s, jid, text, image_path) });
+      } catch (e) { failed.push({ channel: ch, error: String((e && e.message) || e).slice(0, 200) }); }
+      if (delay) await sleep(delay);
+    }
+    audit('broadcast_channels', { total: channels.length, sent: sent.length, failed: failed.length });
+    return ok({ total: channels.length, sent_count: sent.length, failed_count: failed.length, sent, failed });
+  });
+
+// --- Channel management ------------------------------------------------------
+
+server.tool('wa_channel_subscription', 'Follow, unfollow, mute or unmute a WhatsApp Channel from the connected account. Channel may be a JID or an invite link.',
+  { channel: z.string(), action: z.enum(['follow', 'unfollow', 'mute', 'unmute']) },
+  async ({ channel, action }) => {
+    const s = wa.requireSock();
+    const jid = await resolveChannelJid(s, channel);
+    if (action === 'follow') await s.newsletterFollow(jid);
+    else if (action === 'unfollow') await s.newsletterUnfollow(jid);
+    else if (action === 'mute') await s.newsletterMute(jid);
+    else await s.newsletterUnmute(jid);
+    audit('channel_subscription', { channel: jid, action });
+    return ok({ done: true, channel: jid, action });
+  });
+
+server.tool('wa_channel_subscribers', 'Get a WhatsApp Channel subscriber COUNT from its metadata. WhatsApp does not expose subscriber identities to anyone.',
+  { channel: z.string() },
+  async ({ channel }) => {
+    const s = wa.requireSock();
+    const jid = await resolveChannelJid(s, channel);
+    // The Baileys subscriber-list call is broken upstream (WhatsApp changed
+    // the response shape) - report the count from channel metadata instead.
+    const info = await s.newsletterMetadata('jid', jid);
+    return ok({ channel: jid, name: info ? info.name : null, subscribers_count: info ? (info.subscribers ?? null) : null, note: 'Subscriber identities are not exposed by WhatsApp; only the count is available.' });
+  });
+
+server.tool('wa_channel_fetch_messages', 'Fetch recent posts of a WhatsApp Channel (server ids + timestamps) — useful for automation and moderation checks.',
+  { channel: z.string(), count: z.number().int().min(1).max(50).optional() },
+  async ({ channel, count }) => {
+    const s = wa.requireSock();
+    const jid = await resolveChannelJid(s, channel);
+    const msgs = await s.newsletterFetchMessages(jid, count || 10);
+    // Baileys returns the raw IQ node (or undefined when the server has no
+    // updates) - hand back a capped preview instead of the raw node.
+    let preview = null;
+    try { preview = msgs ? JSON.stringify(msgs).slice(0, 4000) : null; } catch (_) {}
+    return ok({ channel: jid, has_updates: !!msgs, raw_preview: preview, note: msgs ? undefined : 'The server returned no message updates for this channel.' });
+  });
+
+server.tool('wa_channel_remove_picture', 'Remove a WhatsApp Channel\'s profile picture. Admin only.',
+  { channel: z.string() },
+  async ({ channel }) => {
+    const s = wa.requireSock();
+    const jid = await resolveChannelJid(s, channel);
+    await s.newsletterRemovePicture(jid);
+    audit('channel_remove_picture', { channel: jid });
+    return ok({ removed: true, channel: jid });
+  });
+
+server.tool('wa_channel_delete', 'DELETE a WhatsApp Channel permanently. The connected number must be the channel owner. This cannot be undone.',
+  { channel: z.string() },
+  async ({ channel }) => {
+    const s = wa.requireSock();
+    const jid = await resolveChannelJid(s, channel);
+    await s.newsletterDelete(jid);
+    audit('channel_delete', { channel: jid });
+    return ok({ deleted: true, channel: jid });
+  });
+
+// --- Automation: scheduled sends ----------------------------------------------
+
+const SCHED_FILE = path.join(__dirname, '..', 'scheduled.json');
+function schedLoad() {
+  try { const arr = JSON.parse(fs.readFileSync(SCHED_FILE, 'utf8')); return Array.isArray(arr) ? arr : []; } catch (_) { return []; }
+}
+function schedSave(items) {
+  try { fs.writeFileSync(SCHED_FILE, JSON.stringify(items, null, 2)); } catch (_) {}
+}
+if (!global.__WA_SCHED_STARTED) {
+  global.__WA_SCHED_STARTED = true;
+  const timer = setInterval(async () => {
+    const items = schedLoad();
+    if (items.length === 0) return;
+    const now = Date.now();
+    let changed = false;
+    for (const it of items) {
+      if (it.next_at && it.next_at <= now) {
+        try {
+          const s = wa.requireSock();
+          const payload = String(it.to).endsWith('@newsletter') ? { text: it.text, _skipForwardContext: true } : { text: it.text };
+          await s.sendMessage(it.to, payload);
+          audit('scheduled_send', { to: it.to, id: it.id, repeat: it.repeat || 'none' });
+          if (it.repeat === 'daily') { it.next_at += 24 * 3600 * 1000; }
+          else if (it.repeat === 'weekly') { it.next_at += 7 * 24 * 3600 * 1000; }
+          else { it.done = true; }
+          changed = true;
+        } catch (_) { /* not connected yet — retried on the next tick (catch-up) */ }
+      }
+    }
+    const kept = items.filter((i) => !i.done);
+    if (changed || kept.length !== items.length) schedSave(kept);
+  }, 20000);
+  if (timer.unref) timer.unref();
+}
+
+server.tool('wa_schedule_send', 'Schedule a text message to any chat, group or channel — once, or repeating daily/weekly. Automation runs inside this server process (checked every 20 seconds; if the server is offline at the due time, the message is sent on the next check after it reconnects). Give at (ISO time) or delay_minutes.',
+  { to: z.string().describe('Recipient: phone number or full JID (...@g.us / ...@newsletter)'),
+    text: z.string().min(1).max(4096),
+    at: z.string().optional().describe('ISO 8601 time, e.g. 2026-11-24T09:00:00+05:00'),
+    delay_minutes: z.number().min(1).max(60 * 24 * 30).optional(),
+    repeat: z.enum(['none', 'daily', 'weekly']).optional() },
+  async ({ to, text, at, delay_minutes, repeat }) => {
+    const target = normJid(to);
+    checkTarget(target);
+    let when;
+    if (at) { when = Date.parse(at); if (!when || Number.isNaN(when)) throw new Error('at is not a valid ISO time.'); }
+    else if (delay_minutes) { when = Date.now() + Math.round(delay_minutes * 60000); }
+    else throw new Error('Give at or delay_minutes.');
+    const items = schedLoad();
+    const id = 'sch_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    items.push({ id, to: target, text, next_at: when, repeat: repeat || 'none', created_at: Date.now() });
+    schedSave(items);
+    audit('schedule_add', { to: target, id, at: when, repeat: repeat || 'none' });
+    return ok({ scheduled: true, id, to: target, next_at: when, next_at_iso: new Date(when).toISOString(), repeat: repeat || 'none' });
+  });
+
+server.tool('wa_list_scheduled', 'List all pending scheduled messages (automation queue).',
+  {},
+  async () => {
+    const items = schedLoad().map((i) => ({ ...i, next_at_iso: i.next_at ? new Date(i.next_at).toISOString() : null }));
+    return ok({ count: items.length, scheduled: items });
+  });
+
+server.tool('wa_cancel_scheduled', 'Cancel a scheduled message by its id (from wa_schedule_send / wa_list_scheduled).',
+  { id: z.string() },
+  async ({ id }) => {
+    const items = schedLoad();
+    const kept = items.filter((i) => i.id !== id);
+    if (kept.length === items.length) throw new Error('No scheduled message with that id.');
+    schedSave(kept);
+    audit('schedule_cancel', { id });
+    return ok({ cancelled: true, id });
+  });
+
+
 server.tool('wa_set_channel_picture', 'Set a WhatsApp Channel profile picture from a local image file. The connected number must be an ADMIN of the channel.',
   { jid: z.string(), image_path: z.string() },
   async ({ jid, image_path }) => {
@@ -320,9 +687,21 @@ server.tool('wa_create_channel', 'Create a new WhatsApp Channel owned by the con
   { name: z.string().min(1).max(100), description: z.string().max(512).optional() },
   async ({ name, description }) => {
     const s = wa.requireSock();
-    const info = await s.newsletterCreate(name, description || '');
-    audit('create_channel', { name });
-    return ok(info);
+    try {
+      const info = await s.newsletterCreate(name, description || '');
+      audit('create_channel', { name });
+      return ok(info);
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      // Known Baileys parser bug: a new channel has no picture, and the
+      // response parser crashes on thread.picture.id AFTER WhatsApp has
+      // already created the channel. Report that honestly instead of failing.
+      if (/Cannot read properties of null/.test(msg)) {
+        audit('create_channel', { name, note: 'created_likely_parse_bug' });
+        return ok({ created_likely: true, name, note: 'WhatsApp accepted the creation but the library could not parse the response (known no-picture bug). The channel should appear in the account Channels list - open it there to copy its link/JID. Do not create it again.' });
+      }
+      throw e;
+    }
   });
 
 server.tool('wa_update_channel', 'Rename a channel and/or update its description. The connected number must be an ADMIN of the channel.',
