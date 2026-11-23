@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WhatsApp Session Pair</title>
+<style>
+  :root {
+    --bg: #0b141a; --card: #111b21; --card2: #1f2c34; --line: #2a3942;
+    --text: #e9edef; --muted: #8696a0; --green: #00a884; --green2: #25d366;
+    --red: #ea0038;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; padding: 28px 16px 48px;
+  }
+  header { text-align: center; margin-bottom: 8px; }
+  header h1 { font-size: 28px; font-weight: 700; letter-spacing: .2px; }
+  header h1 span { color: var(--green2); }
+  header p { color: var(--muted); margin-top: 6px; font-size: 14px; }
+  .badge {
+    display: inline-block; margin-top: 12px; padding: 6px 12px; border: 1px solid var(--line);
+    border-radius: 999px; font-size: 12.5px; color: var(--green2); background: var(--card);
+  }
+  .panel {
+    width: 100%; max-width: 860px; background: var(--card); border: 1px solid var(--line);
+    border-radius: 16px; padding: 22px; margin-top: 22px;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
+  label:first-child { margin-top: 0; }
+  input {
+    width: 100%; background: var(--card2); border: 1px solid var(--line); color: var(--text);
+    border-radius: 10px; padding: 12px 14px; font-size: 15px; outline: none;
+  }
+  input:focus { border-color: var(--green); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 5px; }
+  button {
+    background: var(--green); color: #06281f; border: 0; border-radius: 10px;
+    padding: 12px 20px; font-size: 15px; font-weight: 700; cursor: pointer;
+  }
+  button:hover { background: var(--green2); }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); font-weight: 600; }
+  button.small { padding: 8px 14px; font-size: 13px; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .row > * { flex: 0 0 auto; }
+  .grow { flex: 1 1 auto !important; }
+  #status { margin-top: 16px; font-size: 14px; color: var(--muted); min-height: 20px; }
+  #status.err { color: #ff7a93; }
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 18px; }
+  @media (max-width: 640px) { .cards { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--card2); border: 1px solid var(--line); border-radius: 14px;
+    padding: 18px; text-align: center; min-height: 300px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  }
+  .card h3 { font-size: 15px; font-weight: 600; }
+  .card .sub { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  #qrImg { width: 264px; height: 264px; border-radius: 10px; background: #fff; display: none; }
+  .placeholder { color: var(--muted); font-size: 13.5px; line-height: 1.6; padding: 0 10px; }
+  #pairCode {
+    font-size: 38px; font-weight: 800; letter-spacing: 4px; color: var(--green2);
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; display: none;
+  }
+  #result { display: none; }
+  #result h2 { font-size: 19px; margin-bottom: 4px; }
+  #result .who { color: var(--muted); font-size: 14px; margin-bottom: 14px; }
+  textarea {
+    width: 100%; min-height: 110px; background: var(--card2); border: 1px solid var(--line);
+    color: var(--text); border-radius: 10px; padding: 12px; font-size: 12px;
+    font-family: ui-monospace, Consolas, monospace; resize: vertical;
+  }
+  .warn {
+    margin-top: 14px; font-size: 13px; line-height: 1.55; color: #ffd9a8;
+    background: rgba(234, 160, 0, .08); border: 1px solid rgba(234, 160, 0, .35);
+    padding: 12px 14px; border-radius: 10px;
+  }
+  footer { margin-top: 26px; color: var(--muted); font-size: 12.5px; text-align: center; line-height: 1.7; max-width: 860px; }
+  ol.steps { text-align: left; font-size: 13px; color: var(--muted); line-height: 1.8; padding-left: 18px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>WhatsApp <span>Session Pair</span></h1>
+  <p>Link a WhatsApp number and get its Baileys session — QR and pairing code, at the same time.</p>
+  <div class="badge">🔒 Sessions are generated in server memory only — never stored, never logged</div>
+</header>
+
+<div class="panel" id="setupPanel">
+  <label for="apiBase">Pair server URL</label>
+  <input id="apiBase" placeholder="https://your-pair-server.example.com" autocomplete="off">
+  <div class="hint">The always-on pairing backend (see README). The Vercel page itself cannot hold a WhatsApp connection.</div>
+
+  <label for="phone">WhatsApp number (only needed for the pairing code)</label>
+  <input id="phone" placeholder="923001234567 — country code, no + or spaces" inputmode="numeric" autocomplete="off">
+  <div class="hint">Leave empty if you only want the QR code.</div>
+
+  <div class="row" style="margin-top:18px">
+    <button id="connectBtn">Connect WhatsApp</button>
+    <button id="cancelBtn" class="ghost" disabled>Cancel</button>
+  </div>
+  <div id="status">Idle.</div>
+
+  <div class="cards">
+    <div class="card">
+      <h3>📷 QR Code</h3>
+      <img id="qrImg" alt="WhatsApp QR code">
+      <div class="placeholder" id="qrPlaceholder">Your QR code will appear here.<br>WhatsApp → Linked devices → Link a device</div>
+      <div class="sub">The QR refreshes automatically as WhatsApp rotates it.</div>
+    </div>
+    <div class="card">
+      <h3>🔢 Pairing Code</h3>
+      <div id="pairCode">--------</div>
+      <div class="placeholder" id="pairPlaceholder">Your 8-digit pairing code will appear here.</div>
+      <button id="copyPair" class="small" style="display:none">Copy code</button>
+      <ol class="steps">
+        <li>Open WhatsApp on the phone</li>
+        <li>Linked devices → Link a device</li>
+        <li>Tap “Link with phone number instead”</li>
+        <li>Enter the code</li>
+      </ol>
+    </div>
+  </div>
+</div>
+
+<div class="panel" id="result">
+  <h2>✅ Connected — here is your session</h2>
+  <div class="who" id="who"></div>
+
+  <label>Session ID (base64 — paste this into your bot)</label>
+  <textarea id="sessionId" readonly></textarea>
+  <div class="row" style="margin-top:10px">
+    <button id="copyId" class="small">Copy Session ID</button>
+    <button id="copyJson" class="small ghost">Copy session.json</button>
+    <button id="downloadJson" class="small ghost">Download session.json</button>
+  </div>
+
+  <div class="warn">
+    ⚠️ This session is a full login to that WhatsApp account — treat it like a password and never share it publicly.
+    The pair server has already wiped its copy from memory; this page is the only place it now exists.
+  </div>
+</div>
+
+<footer>
+  Built with Baileys (latest). One socket shows the QR and requests the pairing code together.<br>
+  The server keeps auth state in RAM only — nothing is written to disk or any database, and state is wiped on delivery, expiry (3 minutes) or cancel.
+</footer>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const apiInput = $('apiBase');
+  const params = new URLSearchParams(location.search);
+  apiInput.value = params.get('api') || localStorage.getItem('wa_pair_api') || '';
+  apiInput.addEventListener('change', () => localStorage.setItem('wa_pair_api', apiInput.value.trim()));
+
+  let currentId = null;
+  let events = null;
+  let lastSessionJson = '';
+
+  function apiBase() { return apiInput.value.trim().replace(/\/+$/, ''); }
+  function setStatus(text, isErr) {
+    const el = $('status');
+    el.textContent = text;
+    el.className = isErr ? 'err' : '';
+  }
+
+  async function copyText(text, btn, label) {
+    try {
+      await navigator.clipboard.writeText(text);
+      const old = btn.textContent;
+      btn.textContent = 'Copied ✓';
+      setTimeout(() => (btn.textContent = old || label), 1500);
+    } catch { /* clipboard unavailable */ }
+  }
+
+  $('connectBtn').addEventListener('click', async () => {
+    const base = apiBase();
+    if (!base) { setStatus('Enter the pair server URL first.', true); return; }
+    const phone = $('phone').value.replace(/\D/g, '');
+    $('connectBtn').disabled = true;
+    setStatus('Starting…');
+
+    try {
+      const r = await fetch(base + '/api/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(phone ? { phone } : {})
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+      currentId = data.id;
+      $('cancelBtn').disabled = false;
+      openEvents(base, currentId);
+    } catch (err) {
+      setStatus('Could not start: ' + err.message, true);
+      $('connectBtn').disabled = false;
+    }
+  });
+
+  $('cancelBtn').addEventListener('click', async () => {
+    if (events) events.close();
+    if (currentId && apiBase()) {
+      try { await fetch(apiBase() + '/api/close/' + currentId, { method: 'POST' }); } catch { /* ignore */ }
+    }
+    currentId = null;
+    $('cancelBtn').disabled = true;
+    $('connectBtn').disabled = false;
+    setStatus('Cancelled. Server state wiped.');
+  });
+
+  function openEvents(base, id) {
+    if (events) events.close();
+    events = new EventSource(base + '/api/events/' + id);
+    events.onmessage = (msg) => {
+      let ev;
+      try { ev = JSON.parse(msg.data); } catch { return; }
+
+      if (ev.type === 'status') setStatus(ev.text);
+      if (ev.type === 'qr') {
+        $('qrImg').src = ev.dataUrl;
+        $('qrImg').style.display = 'block';
+        $('qrPlaceholder').style.display = 'none';
+      }
+      if (ev.type === 'pairing') {
+        $('pairCode').textContent = ev.code;
+        $('pairCode').style.display = 'block';
+        $('pairPlaceholder').style.display = 'none';
+        $('copyPair').style.display = 'inline-block';
+        $('copyPair').onclick = () => copyText(ev.code.replace(/-/g, ''), $('copyPair'), 'Copy code');
+      }
+      if (ev.type === 'session') {
+        lastSessionJson = ev.sessionJson;
+        $('sessionId').value = ev.sessionId;
+        const me = ev.me || {};
+        $('who').textContent = 'Linked as ' + (me.name || '') + ' (' + String(me.id || '').split(':')[0].split('@')[0] + ')';
+        $('result').style.display = 'block';
+        $('result').scrollIntoView({ behavior: 'smooth' });
+        setStatus('Connected. Session delivered — server copy wipes in a few seconds.');
+        $('cancelBtn').disabled = true;
+        events.close();
+      }
+      if (ev.type === 'error') {
+        setStatus(ev.text, true);
+        $('connectBtn').disabled = false;
+        $('cancelBtn').disabled = true;
+        events.close();
+      }
+      if (ev.type === 'closed') {
+        setStatus('Session closed and wiped from the server.');
+        $('connectBtn').disabled = false;
+        $('cancelBtn').disabled = true;
+      }
+    };
+    events.onerror = () => setStatus('Live updates disconnected — if the session already arrived above, it is complete.');
+  }
+
+  $('copyId').addEventListener('click', () => copyText($('sessionId').value, $('copyId'), 'Copy Session ID'));
+  $('copyJson').addEventListener('click', () => copyText(lastSessionJson, $('copyJson'), 'Copy session.json'));
+  $('downloadJson').addEventListener('click', () => {
+    const blob = new Blob([lastSessionJson], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'session.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+</script>
+
+</body>
+</html>

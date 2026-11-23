@@ -1,0 +1,1 @@
+{"dependencies":{"@whiskeysockets/baileys":"7.0.0-rc14","https-proxy-agent":"^7.0.6","pino":"^9.0.0","qrcode":"^1.5.4"},"description":"WhatsApp pairing server: QR + pairing code from one Baileys socket. Sessions live in RAM only and are never stored.","main":"index.js","name":"wa-pair-server","private":true,"scripts":{"start":"node index.js"},"version":"1.0.0"}

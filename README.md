@@ -190,3 +190,20 @@ WhatsApp closes the socket once with status 515 ("restart required"). The
 engine reconnects in-process with the saved creds and finishes the pairing —
 if a pairing attempt seems stuck at "connecting", update to the latest
 version first.
+
+## Web pair page (bundled)
+
+Prefer pairing from a web page instead of the terminal? The `pair-page/`
+folder bundles the **WhatsApp Session Pair** page: QR code and pairing code
+on one screen, and it delivers the finished session as JSON / ZIP.
+
+- `pair-page/web/` — the static page. Deploy it anywhere static is served
+  (Vercel: point the project root at `pair-page/`, `vercel.json` is included).
+- `pair-page/server/` — the small always-on pairing backend the page talks
+  to. Run it with `node index.js`, then enter its URL in the page's
+  "Pair server" field. Sessions live in RAM only and are wiped on delivery,
+  expiry, or cancel.
+- `pair-page/server/use-session-json.js` — helper that loads a downloaded
+  session JSON into your own bot.
+
+See `pair-page/README.md` for the full setup.
