@@ -673,6 +673,19 @@ server.tool('wa_cancel_scheduled', 'Cancel a scheduled message by its id (from w
   });
 
 
+server.tool('wa_export_session_zip', 'Export a WhatsApp session folder as a single ZIP file, for backup or moving the session to another host. WARNING: the ZIP contains FULL login credentials for that WhatsApp account - anyone with the file can use the account. Keep it private and never share it publicly.',
+  { session_dir: z.string().optional().describe('Session folder to export (default: WA_SESSION_DIR or the server session folder)'),
+    output_path: z.string().optional().describe('Where to write the ZIP (default: wa-session.zip next to the server folder)') },
+  async ({ session_dir, output_path }) => {
+    const dir = session_dir || process.env.WA_SESSION_DIR || path.join(__dirname, '..', 'session');
+    if (!fs.existsSync(dir)) throw new Error('Session folder not found: ' + dir);
+    const out = output_path || path.join(__dirname, '..', 'wa-session.zip');
+    const { zipSessionDir } = require('./zip-session');
+    const z = zipSessionDir(dir, out);
+    audit('export_session_zip', { bytes: z.bytes, files: z.files });
+    return ok({ exported: true, path: z.path, bytes: z.bytes, files: z.files, warning: 'This ZIP is a full WhatsApp login. Keep it private.' });
+  });
+
 server.tool('wa_set_channel_picture', 'Set a WhatsApp Channel profile picture from a local image file. The connected number must be an ADMIN of the channel.',
   { jid: z.string(), image_path: z.string() },
   async ({ jid, image_path }) => {

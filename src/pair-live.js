@@ -1,49 +1,59 @@
 #!/usr/bin/env node
 'use strict';
-/* pair-live.js — QR pairing into the REAL session dir, for the hosted MCP.
- * Writes the current QR to ../current-qr.png on every rotation.
- * Prints CONNECTED and exits 0 once paired. Run under supervision of the agent.
+/*
+ * pair-live.js — pairing driver for hosted/supervised use.
+ * - Writes every QR rotation to ../current-qr.png and prints QR_READY.
+ * - If WA_PHONE_NUMBER is set, also prints PAIRING_CODE <code> and writes
+ *   it to ../current-code.txt.
+ * - Uses the shared pair-core engine: it survives the post-pairing 515
+ *   restart in-process and only exits when the outcome is final.
+ * Exit codes: 0 = paired (or already paired), 1 = logged out,
+ *             2 = timed out (code/QR expired unused).
+ * On success it also writes ../session.zip (a full login — keep private).
  */
 const fs = require('fs');
 const path = require('path');
-const pino = require('pino');
+const { runPairing } = require('./pair-core');
 
 (async () => {
-  const {
-    default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion
-  } = require('@whiskeysockets/baileys');
-  const QRCode = require('qrcode');
-
   const SESSION_DIR = process.env.WA_SESSION_DIR || path.join(__dirname, '..', 'session');
   const QR_FILE = path.join(__dirname, '..', 'current-qr.png');
-  fs.mkdirSync(SESSION_DIR, { recursive: true });
-  const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-  if (state.creds.registered) { console.log('ALREADY_PAIRED'); process.exit(0); }
-  let version; try { version = (await fetchLatestBaileysVersion()).version; } catch (_) {}
-  let agent; const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
-  if (proxy) { try { agent = new (require('https-proxy-agent').HttpsProxyAgent)(proxy); } catch (_) {} }
+  const CODE_FILE = path.join(__dirname, '..', 'current-code.txt');
+  const PHONE = (process.env.WA_PHONE_NUMBER || '').replace(/\D/g, '');
+  const QRCode = require('qrcode');
 
-  const sock = makeWASocket({
-    version, auth: state, agent,
-    logger: pino({ level: 'silent' }),
-    printQRInTerminal: false,
-    browser: ['WhatsApp MCP', 'Chrome', '1.0.0'],
-    syncFullHistory: false
+  const res = await runPairing({
+    sessionDir: SESSION_DIR,
+    phone: PHONE,
+    onQr: async (qr) => {
+      try {
+        await QRCode.toFile(QR_FILE, qr, { width: 640, margin: 2 });
+        console.log('QR_READY ' + Date.now());
+      } catch (e) {
+        console.log('QR_WRITE_FAIL ' + e.message);
+      }
+    },
+    onCode: (code) => {
+      try { fs.writeFileSync(CODE_FILE, code); } catch (_) {}
+      console.log('PAIRING_CODE ' + code);
+    },
+    onStatus: (s) => console.log('STATUS ' + s),
   });
-  sock.ev.on('creds.update', saveCreds);
-  sock.ev.on('connection.update', async (u) => {
-    if (u.qr) {
-      try { await QRCode.toFile(QR_FILE, u.qr, { width: 640, margin: 2 }); console.log('QR_READY ' + Date.now()); }
-      catch (e) { console.log('QR_WRITE_FAIL ' + e.message); }
+
+  if (res.status === 'already_paired') { console.log('ALREADY_PAIRED'); process.exit(0); }
+  if (res.status === 'paired') {
+    console.log('CONNECTED ' + JSON.stringify(res.user));
+    try {
+      const { zipSessionDir } = require('./zip-session');
+      const z = zipSessionDir(SESSION_DIR, path.join(__dirname, '..', 'session.zip'));
+      console.log('SESSION_ZIP ' + z.path + ' ' + z.bytes);
+    } catch (e) {
+      console.log('SESSION_ZIP_FAIL ' + e.message);
     }
-    if (u.connection === 'open') { console.log('CONNECTED ' + JSON.stringify(sock.user)); setTimeout(() => process.exit(0), 1500); }
-    if (u.connection === 'close') {
-      const code = u.lastDisconnect && u.lastDisconnect.error && u.lastDisconnect.error.output && u.lastDisconnect.error.output.statusCode;
-      console.log('CLOSED code=' + code + (code === DisconnectReason.loggedOut ? ' loggedOut' : ''));
-      if (code === DisconnectReason.loggedOut) process.exit(1);
-      // 515 = restart required right after pairing — treat as progress, exit 0
-      if (code === 515) { console.log('RESTART_REQUIRED_AFTER_PAIR'); process.exit(0); }
-      process.exit(2);
-    }
-  });
-})();
+    setTimeout(() => process.exit(0), 1500);
+    return;
+  }
+  if (res.status === 'logged_out') { console.log('LOGGED_OUT'); process.exit(1); }
+  console.log('NOT_LINKED ' + res.status);
+  process.exit(2);
+})().catch((e) => { console.error('pair-live failed:', e.message); process.exit(1); });

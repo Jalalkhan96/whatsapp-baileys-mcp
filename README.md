@@ -10,7 +10,7 @@ WhatsApp Web), powered by [Baileys](https://github.com/WhiskeySockets/Baileys).
 You pair once with a QR code or pairing code; the session is stored locally and
 reused. **Your session never leaves your machine.**
 
-## Tools (44)
+## Tools (45)
 
 **Messaging**
 
@@ -88,6 +88,7 @@ reused. **Your session never leaves your machine.**
 | `wa_block_user` | Block or unblock a number |
 | `wa_set_profile_picture` | Set the account's profile picture |
 | `wa_get_profile_picture` | Get a user/group profile picture URL |
+| `wa_export_session_zip` | Export the session folder as one ZIP (backup/move) — full login inside, keep private |
 
 
 ## Quick start
@@ -176,3 +177,16 @@ connection — never run two copies of the same session at once.
 ## License
 
 MIT © Jalal Khan
+
+## Found a bug? Want an update?
+
+- **Report it:** open an [Issue](https://github.com/Jalalkhan96/whatsapp-baileys-mcp/issues) — bug reports and feature requests have ready-made templates.
+- **Fix it yourself:** fork the repo, make the change, and send a Pull Request. See [CONTRIBUTING.md](CONTRIBUTING.md) for the flow and ground rules.
+
+## Pairing note
+
+Pairing uses `src/pair-core.js`: after you enter the code (or scan the QR),
+WhatsApp closes the socket once with status 515 ("restart required"). The
+engine reconnects in-process with the saved creds and finishes the pairing —
+if a pairing attempt seems stuck at "connecting", update to the latest
+version first.
